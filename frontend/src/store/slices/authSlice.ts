@@ -1,5 +1,6 @@
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
 import { authAPI } from '../../services/api';
+import { authStorage } from '../../services/authStorage';
 import { User } from '../../types';
 
 interface AuthState {
@@ -10,13 +11,20 @@ interface AuthState {
   error: string | null;
 }
 
+// 重新打开页面时从本地存储恢复登录态
+const storedToken = authStorage.getToken();
+
 const initialState: AuthState = {
   user: null,
-  token: localStorage.getItem('token'),
-  isAuthenticated: !!localStorage.getItem('token'),
+  token: storedToken,
+  isAuthenticated: !!storedToken,
   loading: false,
   error: null,
 };
+
+/** 从接口错误中提取展示文案，各请求入口共用 */
+const errorMessage = (error: any, fallback: string): string =>
+  error?.response?.data?.detail || fallback;
 
 export const login = createAsyncThunk(
   'auth/login',
@@ -24,15 +32,20 @@ export const login = createAsyncThunk(
     try {
       const response = await authAPI.login(username, password);
       const { access_token } = response.data;
-      localStorage.setItem('token', access_token);
+      authStorage.setToken(access_token);
 
-      const userResponse = await authAPI.getCurrentUser();
-      const user = userResponse.data;
-      localStorage.setItem('user', JSON.stringify(user));
-
-      return { user, token: access_token };
+      try {
+        const userResponse = await authAPI.getCurrentUser();
+        const user = userResponse.data;
+        authStorage.setUser(user);
+        return { user, token: access_token };
+      } catch (error) {
+        // 已拿到 token 但拉取用户信息失败：回滚本次登录写入的本地内容
+        authStorage.clear();
+        throw error;
+      }
     } catch (error: any) {
-      return rejectWithValue(error.response?.data?.detail || '登录失败');
+      return rejectWithValue(errorMessage(error, '登录失败'));
     }
   }
 );
@@ -44,7 +57,7 @@ export const register = createAsyncThunk(
       const response = await authAPI.register(userData);
       return response.data;
     } catch (error: any) {
-      return rejectWithValue(error.response?.data?.detail || '注册失败');
+      return rejectWithValue(errorMessage(error, '注册失败'));
     }
   }
 );
@@ -54,15 +67,26 @@ export const getCurrentUser = createAsyncThunk('auth/getCurrentUser', async (_, 
     const response = await authAPI.getCurrentUser();
     return response.data;
   } catch (error: any) {
-    return rejectWithValue(error.response?.data?.detail || '获取用户信息失败');
+    return rejectWithValue(errorMessage(error, '获取用户信息失败'));
   }
 });
 
 export const logout = createAsyncThunk('auth/logout', async () => {
-  localStorage.removeItem('token');
-  localStorage.removeItem('user');
+  authStorage.clear();
   return null;
 });
+
+/** 各请求共用的加载中处理 */
+const handlePending = (state: AuthState) => {
+  state.loading = true;
+  state.error = null;
+};
+
+/** 各请求共用的失败处理 */
+const handleRejected = (state: AuthState, action: PayloadAction<any>) => {
+  state.loading = false;
+  state.error = action.payload as string;
+};
 
 const authSlice = createSlice({
   name: 'auth',
@@ -74,31 +98,19 @@ const authSlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
-      .addCase(login.pending, (state) => {
-        state.loading = true;
-        state.error = null;
-      })
+      .addCase(login.pending, handlePending)
       .addCase(login.fulfilled, (state, action: PayloadAction<{ user: User; token: string }>) => {
         state.loading = false;
         state.user = action.payload.user;
         state.token = action.payload.token;
         state.isAuthenticated = true;
       })
-      .addCase(login.rejected, (state, action: PayloadAction<any>) => {
-        state.loading = false;
-        state.error = action.payload as string;
-      })
-      .addCase(register.pending, (state) => {
-        state.loading = true;
-        state.error = null;
-      })
+      .addCase(login.rejected, handleRejected)
+      .addCase(register.pending, handlePending)
       .addCase(register.fulfilled, (state) => {
         state.loading = false;
       })
-      .addCase(register.rejected, (state, action: PayloadAction<any>) => {
-        state.loading = false;
-        state.error = action.payload as string;
-      })
+      .addCase(register.rejected, handleRejected)
       .addCase(getCurrentUser.fulfilled, (state, action: PayloadAction<User>) => {
         state.user = action.payload;
       })
